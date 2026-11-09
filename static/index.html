@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>栖点 · STAYPOINT 酒店雷达</title>
+  <meta name="description" content="输入地区或地标，按半径查找可入住酒店、参考套房、真实评论与实拍图片。">
+  <link rel="icon" href="/static/img/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/vendor/leaflet/leaflet.css">
+  <link rel="stylesheet" href="/static/vendor/leaflet-markercluster/MarkerCluster.css">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <div class="app" id="app">
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">栖</span>
+        <div class="brand-text">
+          <h1>栖点 <em>STAYPOINT</em></h1>
+          <p>酒店雷达 · 地标周边可入住酒店</p>
+        </div>
+      </div>
+      <div class="topbar-actions">
+        <button class="ghost-btn" id="aboutBtn" type="button">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 7.6v.2"/></svg>
+          数据说明
+        </button>
+        <span class="live-pill" id="livePill"><i></i><span>百度地图实时数据</span></span>
+      </div>
+    </header>
+
+    <section class="search-shell" aria-label="酒店搜索">
+      <div class="search-main">
+        <div class="search-field">
+          <svg class="pin-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 21s7-5.4 7-11A7 7 0 0 0 5 10c0 5.6 7 11 7 11Z"/><circle cx="12" cy="10" r="2.6"/></svg>
+          <input id="query" type="text" placeholder="输入地区 / 地标，例如：上海外滩、杭州西湖、北京故宫" autocomplete="off" spellcheck="false" aria-label="地区或地标">
+          <button class="clear-btn" id="clearBtn" type="button" aria-label="清空输入" hidden>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17"/></svg>
+          </button>
+          <div class="suggest-box" id="suggestBox" hidden role="listbox"></div>
+        </div>
+        <label class="radius-field">
+          <span>查询半径</span>
+          <select id="radius" aria-label="查询半径">
+            <option value="500">500 米</option>
+            <option value="1000">1 公里</option>
+            <option value="2000">2 公里</option>
+            <option value="3000" selected>3 公里</option>
+            <option value="5000">5 公里</option>
+            <option value="10000">10 公里</option>
+          </select>
+        </label>
+        <button class="search-btn" id="searchBtn" type="button">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4.2 4.2"/></svg>
+          <span>搜索酒店</span>
+        </button>
+      </div>
+      <div class="quick-row" id="quickRow">
+        <span class="quick-label">试试</span>
+        <button class="quick-chip" data-query="上海外滩">上海外滩</button>
+        <button class="quick-chip" data-query="杭州西湖">杭州西湖</button>
+        <button class="quick-chip" data-query="北京故宫">北京故宫</button>
+        <button class="quick-chip" data-query="成都太古里">成都太古里</button>
+        <button class="quick-chip" data-query="深圳湾公园">深圳湾公园</button>
+      </div>
+    </section>
+
+    <main class="workspace">
+      <aside class="results-panel" aria-label="酒店结果">
+        <div class="results-head">
+          <div>
+            <p class="eyebrow" id="resultEyebrow">RADAR / 地标周边</p>
+            <h2 id="resultTitle">探索地标周边的酒店</h2>
+            <p class="result-sub" id="resultSub">输入地区或地标，查看半径内可入住的酒店</p>
+          </div>
+          <div class="source-badge" id="sourceBadge" hidden></div>
+        </div>
+
+        <div class="filter-row">
+          <label class="switch">
+            <input type="checkbox" id="onlyBookable" checked>
+            <span class="switch-track"><span class="switch-dot"></span></span>
+            <span>仅看今晚可订</span>
+          </label>
+          <div class="sort-tabs" id="sortTabs" role="tablist" aria-label="排序方式">
+            <button type="button" data-sort="distance" class="active" role="tab" aria-selected="true">距离</button>
+            <button type="button" data-sort="price" role="tab" aria-selected="false">价格</button>
+            <button type="button" data-sort="rating" role="tab" aria-selected="false">评分</button>
+          </div>
+          <button class="filter-btn" id="filterBtn" type="button" aria-expanded="false" aria-controls="filterPanel">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M7 12h10M10 18h4"/></svg>
+            <span>筛选</span>
+            <b class="filter-badge" id="filterBadge" hidden>0</b>
+            <svg class="filter-caret" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+          </button>
+        </div>
+
+        <div class="filter-panel" id="filterPanel" hidden>
+          <div class="fp-head">
+            <div>
+              <p class="fp-eyebrow">REFINE / 细筛</p>
+              <h3>缩小范围，找到更合适的房</h3>
+            </div>
+            <span class="fp-hint">条件会保留在链接中</span>
+          </div>
+          <div class="fp-body">
+            <section class="fp-group">
+              <div class="fp-title">每晚价格 <small>含公开起价</small></div>
+              <div class="fp-presets" id="pricePresets">
+                <button type="button" data-price-min="0" data-price-max="300">¥300 以下</button>
+                <button type="button" data-price-min="300" data-price-max="600">¥300–600</button>
+                <button type="button" data-price-min="600" data-price-max="1000">¥600–1000</button>
+                <button type="button" data-price-min="1000" data-price-max="2000">¥1000–2000</button>
+                <button type="button" data-price-min="2000" data-price-max="0">¥2000 以上</button>
+              </div>
+              <div class="fp-range">
+                <label><span>最低</span><input id="filterPriceMin" type="number" min="0" max="100000" step="50" inputmode="numeric" placeholder="不限"></label>
+                <span class="fp-dash">—</span>
+                <label><span>最高</span><input id="filterPriceMax" type="number" min="0" max="100000" step="50" inputmode="numeric" placeholder="不限"></label>
+              </div>
+            </section>
+
+            <section class="fp-group">
+              <div class="fp-title">酒店档次 <small>可多选</small></div>
+              <div class="fp-checks" id="levelChecks">
+                <label><input type="checkbox" value="经济型"><span>经济型</span></label>
+                <label><input type="checkbox" value="舒适型"><span>舒适型</span></label>
+                <label><input type="checkbox" value="高档型"><span>高档型</span></label>
+                <label><input type="checkbox" value="豪华型"><span>豪华型</span></label>
+                <label><input type="checkbox" value="五星级"><span>五星级</span></label>
+              </div>
+            </section>
+
+            <section class="fp-group">
+              <div class="fp-title">评分与评价</div>
+              <div class="fp-selects">
+                <label class="fp-select"><span>最低评分</span>
+                  <select id="filterRating">
+                    <option value="0">不限</option>
+                    <option value="4.0">4.0 分以上</option>
+                    <option value="4.5">4.5 分以上</option>
+                    <option value="4.7">4.7 分以上</option>
+                  </select>
+                </label>
+                <label class="fp-select"><span>最低评价数</span>
+                  <select id="filterReviews">
+                    <option value="0">不限</option>
+                    <option value="10">10 条以上</option>
+                    <option value="50">50 条以上</option>
+                    <option value="100">100 条以上</option>
+                  </select>
+                </label>
+              </div>
+            </section>
+
+            <section class="fp-group fp-group-wide">
+              <div class="fp-title">设施与体验 <small>任一命中即可</small></div>
+              <div class="fp-checks fp-tags" id="tagChecks">
+                <label><input type="checkbox" value="近地铁"><span>近地铁</span></label>
+                <label><input type="checkbox" value="免费停车"><span>免费停车</span></label>
+                <label><input type="checkbox" value="近景点"><span>近景点</span></label>
+                <label><input type="checkbox" value="家庭房"><span>家庭房</span></label>
+                <label><input type="checkbox" value="会议室"><span>会议室</span></label>
+                <label><input type="checkbox" value="景观很棒"><span>景观很棒</span></label>
+                <label><input type="checkbox" value="浴缸"><span>浴缸</span></label>
+                <label><input type="checkbox" value="接送机"><span>接送机</span></label>
+              </div>
+            </section>
+
+            <section class="fp-group fp-group-wide">
+              <div class="fp-title">名称 / 品牌关键词</div>
+              <label class="fp-kw">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m16 16 4 4"/></svg>
+                <input id="filterKw" type="text" maxlength="40" placeholder="如：半岛、华尔道夫、希尔顿" autocomplete="off">
+              </label>
+            </section>
+          </div>
+          <div class="fp-footer">
+            <span class="fp-result-hint">筛选后统计、排序与地图点位会同步更新</span>
+            <div class="fp-actions">
+              <button class="fp-reset" id="filterReset" type="button">重置</button>
+              <button class="fp-apply" id="filterApply" type="button">应用筛选</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="active-filters" id="activeFilters" hidden></div>
+        <div class="stat-bar" id="statBar" hidden></div>
+        <div class="warning-bar" id="warningBar" hidden></div>
+
+        <div class="results-list" id="resultsList">
+          <div class="welcome-card" id="welcomeCard">
+            <div class="welcome-art" aria-hidden="true">
+              <div class="radar-ring r1"></div>
+              <div class="radar-ring r2"></div>
+              <div class="radar-ring r3"></div>
+              <div class="radar-sweep"></div>
+              <span class="radar-dot d1"></span>
+              <span class="radar-dot d2"></span>
+              <span class="radar-dot d3"></span>
+              <span class="radar-center">栖</span>
+            </div>
+            <h3>以地标为圆心，找一间今晚能住的房</h3>
+            <p>输入地区或地标，选择查询半径。每一家酒店都提供实时起价、真实评分、精选评论与实拍图集；展开详情还能看到房型与套房参考信息。</p>
+            <div class="welcome-features">
+              <span>实时房价</span><span>真实评论</span><span>住客实拍</span><span>地图雷达</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="results-footer" id="resultsFooter" hidden>
+          <span id="footerCount"></span>
+          <span class="footer-note">数据来自百度地图公开页面 · 仅供学习演示</span>
+        </div>
+      </aside>
+
+      <section class="map-panel" id="mapPanel" aria-label="酒店地图">
+        <div id="map"></div>
+        <div class="map-topbar">
+          <div class="map-chip" id="mapChip">拖动缩放地图 · 点击价格气泡查看酒店</div>
+        </div>
+        <div class="map-actions">
+          <button class="map-btn" id="centerBtn" type="button" title="回到查询中心">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="7"/><circle cx="12" cy="12" r="2"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/></svg>
+            回到中心
+          </button>
+        </div>
+        <div class="tile-fallback" id="tileFallback" hidden>
+          <div class="fallback-title">地图瓦片暂时不可用</div>
+          <div class="fallback-sub">已切换为雷达底图，酒店点位与信息仍可正常查看</div>
+        </div>
+        <div class="map-legend" id="mapLegend" hidden>
+          <span><i class="legend-dot available"></i>今晚可订</span>
+          <span><i class="legend-dot unavailable"></i>暂不可订</span>
+          <span><i class="legend-circle"></i>查询半径</span>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div class="drawer-scrim" id="drawerScrim" hidden></div>
+  <aside class="drawer" id="drawer" aria-label="酒店详情" aria-hidden="true">
+    <div class="drawer-inner" id="drawerInner"></div>
+  </aside>
+
+  <div class="lightbox" id="lightbox" hidden role="dialog" aria-modal="true" aria-label="图片预览">
+    <button class="lightbox-close" id="lightboxClose" type="button" aria-label="关闭图片预览">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>
+    </button>
+    <button class="lightbox-nav prev" id="lightboxPrev" type="button" aria-label="上一张">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 5-7 7 7 7"/></svg>
+    </button>
+    <figure class="lightbox-figure">
+      <img id="lightboxImg" src="" alt="">
+      <figcaption id="lightboxCaption"></figcaption>
+    </figure>
+    <button class="lightbox-nav next" id="lightboxNext" type="button" aria-label="下一张">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5 7 7-7 7"/></svg>
+    </button>
+  </div>
+
+  <div class="modal" id="aboutModal" hidden role="dialog" aria-modal="true" aria-labelledby="aboutTitle">
+    <div class="modal-card">
+      <button class="modal-close" id="aboutClose" type="button" aria-label="关闭">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>
+      </button>
+      <p class="eyebrow">ABOUT THE DATA</p>
+      <h2 id="aboutTitle">关于这套数据</h2>
+      <div class="modal-body">
+        <p>「栖点」是一个本地运行的酒店查询演示程序。搜索时，后端会以你输入的地标为圆心，抓取百度地图公开页面中半径内的酒店 POI 信息，并在本地完成距离过滤、排序和展示。</p>
+        <ul>
+          <li><b>真实数据：</b>酒店名称、地址、星级/类型、评分、评论数、今晚起价、精选评论和酒店实拍图均来自百度地图公开页面。</li>
+          <li><b>参考数据：</b>百度公开接口不提供完整房型日历。「实时在售」房型使用公开起价；标注「参考套房」的房型由酒店等级与起价估算，仅用于演示，实际房型、面积、早餐与取消政策以酒店为准。</li>
+          <li><b>图片：</b>由本地后端代理下载并缓存，不直接热链第三方 CDN。</li>
+          <li><b>离线兜底：</b>网络不可用时会切换到内置的少量离线样本（上海外滩 / 杭州西湖 / 北京故宫 / 成都太古里）；其他地标会明确提示暂不可用。</li>
+        </ul>
+        <p class="modal-warn">本程序仅用于学习与技术演示，不构成预订建议；请勿高频抓取或用于商业用途。</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="toast" id="toast" hidden></div>
+
+  <script src="/static/vendor/leaflet/leaflet.js"></script>
+  <script src="/static/vendor/leaflet-markercluster/leaflet.markercluster.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>
