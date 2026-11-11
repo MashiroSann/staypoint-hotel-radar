@@ -218,11 +218,12 @@
   function syncUrl() {
     try {
       const params = new URLSearchParams();
-      params.set("q", state.query);
+      if (state.query) params.set("q", state.query);
       params.set("radius", String(state.radius));
       if (!state.onlyBookable) params.set("bookable", "0");
       appendFilterParams(params);
-      history.replaceState(null, "", `${location.pathname}?${params.toString()}`);
+      const qs = params.toString();
+      history.replaceState(null, "", `${location.pathname}${qs ? "?" + qs : ""}`);
     } catch (_) { /* ignore */ }
   }
 
@@ -247,10 +248,10 @@
     bindEvents();
     initMap();
     restorePrefs();
-    const initial = state.query || "上海外滩";
-    els.query.value = initial;
+    els.query.value = state.query;
     updateClearBtn();
-    setTimeout(() => runSearch(), 380);
+    // 只有链接里明确带了 q 才自动查询；否则停留在欢迎页，不再默认搜某个地标。
+    if (state.query) setTimeout(() => runSearch(), 260);
   }
 
   function restorePrefs() {
@@ -269,7 +270,8 @@
     state.onlyBookable = urlBookable === "0" ? false : (urlBookable === "1" ? true : savedBookable !== "0");
     els.onlyBookable.checked = state.onlyBookable;
 
-    state.query = (params.get("q") || readPref("sp_last_query") || "").trim();
+    // 只认链接里的 q；不再从 localStorage 恢复上次查询，避免打开页面就自动搜旧关键词。
+    state.query = (params.get("q") || "").trim();
 
     const hasUrlFilters = FILTER_PARAM_KEYS.some((key) => params.has(key));
     state.filters = hasUrlFilters ? readFiltersFromParams(params) : readSavedFilters();
@@ -686,7 +688,7 @@
     const controller = new AbortController();
     state.abort = controller;
     let timedOut = false;
-    const timeout = setTimeout(() => { timedOut = true; controller.abort(); }, 30000);
+    const timeout = setTimeout(() => { timedOut = true; controller.abort(); }, 60000);
 
     setLoadingUI(true);
     showSkeleton();
@@ -711,7 +713,6 @@
         throw new Error((data && data.error) || `查询失败（HTTP ${res.status}）`);
       }
       applyResult(data);
-      savePref("sp_last_query", query);
       savePref("sp_radius", state.radius);
       syncUrl();
     } catch (err) {

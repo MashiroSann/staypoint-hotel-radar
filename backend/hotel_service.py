@@ -132,11 +132,6 @@ def _filter_hotels(hotels: List[Dict[str, Any]],
     return result
 
 
-def _service_cache_key(query: str, radius: int, bookable: bool, sort: str,
-                       limit: int, filters_key: str = "") -> str:
-    return f"service|{query}|{radius}|{int(bookable)}|{sort}|{limit}|{filters_key}"
-
-
 def _dedupe(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     best: Dict[str, Dict[str, Any]] = {}
     for item in items:
@@ -216,22 +211,13 @@ def _finalize(anchor: Dict[str, Any], hotels: List[Dict[str, Any]], radius_m: in
 
 
 def search_hotels(query: str, radius_m: int = 3000, only_bookable: bool = True,
-                  sort: str = "distance", limit: int = 48, use_cache: bool = True,
+                  sort: str = "distance", limit: int = 300,
                   filters: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     started = time.time()
     radius_m = max(300, min(int(radius_m), 20000))
     sort = sort if sort in SORT_OPTIONS else "distance"
-    limit = max(1, min(int(limit), 80))
+    limit = max(1, min(int(limit), 500))
     active_filters = normalize_filters(filters)
-    filters_key = json.dumps(active_filters, ensure_ascii=False, sort_keys=True,
-                             separators=(",", ":"))
-    cache_key = _service_cache_key(query, radius_m, only_bookable, sort, limit, filters_key)
-    if use_cache:
-        cached = baidu._cache_get(cache_key)
-        if cached is not None:
-            cached = dict(cached)
-            cached["cached"] = True
-            return cached
 
     try:
         anchor = baidu.resolve_query(query)
@@ -259,8 +245,6 @@ def search_hotels(query: str, radius_m: int = 3000, only_bookable: bool = True,
         result = _finalize(anchor, hotels, radius_m, query, "live",
                            stats_hotels=all_hotels, filters=active_filters)
         result["elapsed_ms"] = int((time.time() - started) * 1000)
-        if use_cache:
-            baidu._cache_put(cache_key, result)
         return result
     except baidu.BaiduError as exc:
         log.warning("live search failed: %s", exc)
@@ -293,7 +277,7 @@ def _offline_landmark_names() -> List[str]:
 
 
 def search_offline(query: str, radius_m: int, only_bookable: bool, sort: str,
-                   limit: int = 48, filters: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+                   limit: int = 300, filters: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     active_filters = normalize_filters(filters)
     landmarks = _offline_landmarks()
     if not landmarks:

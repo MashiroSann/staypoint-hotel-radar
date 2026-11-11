@@ -8,13 +8,11 @@ from __future__ import annotations
 import base64
 import json
 import logging
-import math
 import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Dict, Iterable, List, Optional
-from urllib.parse import urlparse
+from typing import Any, Dict, List, Optional
 
 import requests
 
@@ -47,10 +45,6 @@ IMAGE_HOST_SUFFIXES = (
 )
 
 _LOCAL = threading.local()
-_CACHE: Dict[str, tuple[float, Any]] = {}
-_CACHE_LOCK = threading.Lock()
-_CACHE_TTL = 300.0
-_CACHE_MAX = 320
 
 
 class BaiduError(RuntimeError):
@@ -65,65 +59,70 @@ def _session() -> requests.Session:
         adapter = requests.adapters.HTTPAdapter(pool_connections=12, pool_maxsize=24)
         s.mount("https://", adapter)
         s.mount("http://", adapter)
+        try:
+            # 先访问一次首页拿到 BAIDUID Cookie；桌面版 qt=s 接口对没有 Cookie 的请求更容易 403。
+            s.get(MAP_URL, timeout=6)
+        except Exception:  # noqa: BLE001
+            pass
         _LOCAL.session = s
     return s
 
 
-def _cache_get(key: str) -> Optional[Any]:
-    with _CACHE_LOCK:
-        hit = _CACHE.get(key)
-        if not hit:
-            return None
-        ts, value = hit
-        if time.time() - ts > _CACHE_TTL:
-            _CACHE.pop(key, None)
-            return None
-        return value
+def _content(data: Dict[str, Any]) -> List[Dict[str, Any]]:
+    raw = data.get("content") or []
+    if isinstance(raw, dict):
+        # 区县等“行政区划”查询会返回单个对象而不是数组，补一个 name 方便统一处理。
+        raw = [raw]
+    items: List[Dict[str, Any]] = []
+    for x in raw:
+        if not isinstance(x, dict):
+            continue
+        if not x.get("name"):
+            x = dict(x)
+            x["name"] = x.get("cname") or x.get("gbk_name") or ""
+        items.append(x)
+    return items
 
 
-def _cache_put(key: str, value: Any) -> None:
-    with _CACHE_LOCK:
-        if len(_CACHE) > _CACHE_MAX:
-            for k in sorted(_CACHE, key=lambda k: _CACHE[k][0])[:40]:
-                _CACHE.pop(k, None)
-        _CACHE[key] = (time.time(), value)
+def _desktop_search_page(keyword: str, city_code: Optional[int], page: int,
+                         bounds: Optional[str] = None, timeout: float = 15.0,
+                         retries: int = 2) -> Dict[str, Any]:
+    """桌面版 `qt=s` JSON 接口，支持 `b=` 矩形范围与深翻页。
 
-
-def _request_json(params: Dict[str, Any], timeout: float = 12.0, retries: int = 2) -> Dict[str, Any]:
+    `b=(x1,y1;x2,y2)` 的单位是 BD-09 墨卡托米（即 content[].x / 100），
+    传了它以后翻页会围绕该范围深挖，而不是城市级混排结果。
+    """
+    params: Dict[str, Any] = {
+        "qt": "s", "wd": keyword, "pn": max(0, int(page)), "rn": 10, "ie": "utf-8",
+    }
+    if city_code:
+        params["c"] = int(city_code)
+    if bounds:
+        params["b"] = bounds
+        params["l"] = 12
     last_err: Optional[Exception] = None
     for attempt in range(retries + 1):
         try:
             resp = _session().get(MAP_URL, params=params, timeout=timeout)
-            resp.raise_for_status()
+            if resp.status_code != 200:
+                raise BaiduError(f"HTTP {resp.status_code}")
             data = resp.json()
             if not isinstance(data, dict):
                 raise BaiduError("接口返回格式异常")
             anti = data.get("result") or {}
             if isinstance(anti, dict) and (anti.get("anti_session") or {}).get("need_recaptcha"):
-                raise BaiduError("百度地图要求人机验证，请稍后重试")
+                raise BaiduError("百度地图要求人机验证")
             return data
-        except BaiduError:
-            raise
         except Exception as exc:  # noqa: BLE001
             last_err = exc
             if attempt < retries:
-                time.sleep(0.35 + attempt * 0.5)
+                time.sleep(0.8 + attempt * 1.2)
     raise BaiduError(f"百度地图请求失败：{last_err}")
-
-
-def _content(data: Dict[str, Any]) -> List[Dict[str, Any]]:
-    raw = data.get("content") or []
-    return [x for x in raw if isinstance(x, dict)]
 
 
 def _mobile_search_page(keyword: str, city_code: Optional[int], page: int,
                         timeout: float = 20.0, retries: int = 2) -> Dict[str, Any]:
-    """读取百度地图移动版搜索页的 SSR 数据。
-
-    直接请求 `qt=s` JSON 接口时，百度可能按 IP 要求人机验证；移动版搜索
-    结果页仍会把整页 POI 数据（含价格、评分、评论、照片）序列化在 HTML
-    中，因此从页面里解析同一份 content 结构，作为主数据源。
-    """
+    """移动版搜索页 SSR 兜底：桌面接口被风控时会整页内嵌同一份 content。"""
     params: Dict[str, Any] = {
         "qt": "s", "wd": keyword, "pn": max(0, int(page)), "rn": 10, "ie": "utf-8",
     }
@@ -156,14 +155,14 @@ def _mobile_search_page(keyword: str, city_code: Optional[int], page: int,
     raise BaiduError(f"百度地图请求失败：{last_err}")
 
 
-def _search_page(keyword: str, city_code: Optional[int], page: int) -> Dict[str, Any]:
-    key = f"s|{keyword}|{city_code}|{page}"
-    cached = _cache_get(key)
-    if cached is not None:
-        return cached
-    data = _mobile_search_page(keyword, city_code, page)
-    _cache_put(key, data)
-    return data
+def _search_page(keyword: str, city_code: Optional[int], page: int,
+                 bounds: Optional[str] = None) -> Dict[str, Any]:
+    """先走桌面 JSON 接口（支持范围+深翻页），失败再退回移动版页面。"""
+    try:
+        return _desktop_search_page(keyword, city_code, page, bounds=bounds)
+    except BaiduError as exc:
+        log.info("desktop search failed (%s), fallback to mobile: %s", keyword, exc)
+        return _mobile_search_page(keyword, city_code, page)
 
 
 def _city_center_raw(geo: str) -> Optional[tuple[float, float]]:
@@ -244,11 +243,6 @@ def resolve_query(query: str) -> Dict[str, Any]:
     if len(query) > 60:
         raise BaiduError("搜索词太长，请精简后重试")
 
-    cache_key = f"anchor|{query}"
-    cached = _cache_get(cache_key)
-    if cached is not None:
-        return cached
-
     data: Optional[Dict[str, Any]] = None
     try:
         data = _search_page(query, None, 0)
@@ -296,7 +290,6 @@ def resolve_query(query: str) -> Dict[str, Any]:
         "lng": round(lng, 7),
         "lat": round(lat, 7),
     })
-    _cache_put(cache_key, anchor)
     return anchor
 
 
@@ -331,10 +324,6 @@ def _suggest_city_code(query: str) -> Optional[int]:
     每条的 `pf[4]` 就是城市码；这样即使移动版搜索页无法解析裸区县名，
     也能拿到城市上下文。
     """
-    cache_key = f"sucid|{query}"
-    cached = _cache_get(cache_key)
-    if cached is not None:
-        return cached or None
     code: Optional[int] = None
     try:
         resp = _session().get(
@@ -350,7 +339,6 @@ def _suggest_city_code(query: str) -> Optional[int]:
                 break
     except Exception as exc:  # noqa: BLE001
         log.info("suggest city inference failed: %s", exc)
-    _cache_put(cache_key, code)
     return code
 
 
@@ -359,10 +347,6 @@ def suggest(query: str, city_code: Optional[int] = None) -> List[Dict[str, Any]]
     if not query:
         return []
     city_code = city_code or _suggest_city_code(query)
-    cache_key = f"su|{query}|{city_code}"
-    cached = _cache_get(cache_key)
-    if cached is not None:
-        return cached
     params: Dict[str, Any] = {"wd": query, "type": 0, "pc_ver": 2,
                               "cid": city_code or 0}
     try:
@@ -374,56 +358,68 @@ def suggest(query: str, city_code: Optional[int] = None) -> List[Dict[str, Any]]
     except Exception as exc:  # noqa: BLE001
         log.info("suggest failed: %s", exc)
         rows = []
-    _cache_put(cache_key, rows)
     return rows
 
 
-def _pages_for_radius(radius_m: int) -> tuple[int, int]:
+# 每类 POI 的搜索词；百度“酒店”类目下还混着宾馆/民宿/公寓等词条，
+# 只搜“酒店”会漏掉相当一部分，所以按类别并行抓取后取并集。
+HOTEL_TERMS = ("酒店", "宾馆", "民宿", "公寓", "客栈", "旅社")
+
+# 半径 -> 每个关键词翻页数（每页 10 条）。百度单关键词最多约 20 页。
+_PAGES_BY_RADIUS = (
+    (1000, 2),
+    (2000, 3),
+    (3000, 4),
+    (5000, 6),
+    (8000, 7),
+    (20000, 9),
+)
+
+
+def _pages_for_radius(radius_m: int) -> int:
     r = max(300, min(int(radius_m), 20000))
-    if r <= 600:
-        return 1, 0
-    if r <= 1200:
-        return 2, 0
-    if r <= 2500:
-        return 3, 2
-    if r <= 5000:
-        return 4, 4
-    return 6, 7
+    for limit, pages in _PAGES_BY_RADIUS:
+        if r <= limit:
+            return pages
+    return 9
+
+
+def _bounds_for(anchor: Dict[str, Any], radius_m: int) -> str:
+    """构造 `b=(x1,y1;x2,y2)`，单位为 BD09MC 米（content 坐标 / 100）。"""
+    pad = max(600, int(radius_m * 0.15))
+    half = max(300, min(int(radius_m), 20000)) + pad
+    x = float(anchor["x"]) / coords.BD09MC_SCALE
+    y = float(anchor["y"]) / coords.BD09MC_SCALE
+    return f"({x - half:.2f},{y - half:.2f};{x + half:.2f},{y + half:.2f})"
 
 
 def collect_raw_hotels(query: str, anchor: Dict[str, Any], radius_m: int) -> List[Dict[str, Any]]:
-    """并行抓取关键词页面，去重后返回原始 POI 列表（未按半径过滤）。"""
-    local_pages, city_pages = _pages_for_radius(radius_m)
+    """并行抓取多个关键词的多页结果，去重后返回原始 POI 列表（未按半径过滤）。"""
     city_code = anchor.get("city_code")
     anchor_name = str(anchor.get("name") or query)
+    bounds = _bounds_for(anchor, radius_m)
+    pages = _pages_for_radius(radius_m)
 
-    jobs: List[tuple[str, int]] = []
     terms: List[str] = []
 
-    def add_term(term: str, pages: int) -> None:
+    def add_term(term: str) -> None:
         term = term.strip()
-        if not term or term in terms:
-            return
-        terms.append(term)
-        jobs.extend((term, p) for p in range(pages))
+        if term and term not in terms:
+            terms.append(term)
 
-    add_term(f"{anchor_name}酒店", local_pages)
+    # 地标限定词放在前面：先拿“杭州站酒店”这类强相关结果，再用类目词补全半径覆盖。
+    add_term(f"{anchor_name}酒店")
     if anchor_name != query:
-        add_term(f"{query}酒店", local_pages)
-    add_term(f"{anchor_name} 酒店", max(1, local_pages - 1))
-    if city_pages:
-        add_term("酒店", city_pages)
-        add_term("民宿", max(1, city_pages // 2))
+        add_term(f"{query}酒店")
+    for term in HOTEL_TERMS:
+        add_term(term)
+
+    jobs: List[tuple[str, int]] = [(term, page) for term in terms for page in range(pages)]
 
     results: List[Dict[str, Any]] = []
-    cache_hits = 0
-    with ThreadPoolExecutor(max_workers=min(4, len(jobs) or 1)) as pool:
-        futures = []
-        for term, page in jobs:
-            key = f"s|{term}|{city_code}|{page}"
-            if _cache_get(key) is not None:
-                cache_hits += 1
-            futures.append((term, page, pool.submit(_search_page, term, city_code, page)))
+    with ThreadPoolExecutor(max_workers=min(6, len(jobs) or 1)) as pool:
+        futures = [(term, page, pool.submit(_search_page, term, city_code, page, bounds))
+                   for term, page in jobs]
         for term, page, fut in futures:
             try:
                 data = fut.result()
@@ -434,8 +430,8 @@ def collect_raw_hotels(query: str, anchor: Dict[str, Any], radius_m: int) -> Lis
                 item["_match_term"] = term
                 results.append(item)
 
-    log.info("collect query=%r anchor=%r jobs=%s cache_hits=%s raw=%s",
-             query, anchor_name, len(jobs), cache_hits, len(results))
+    log.info("collect query=%r anchor=%r terms=%s pages=%s bounds=%s raw=%s",
+             query, anchor_name, len(terms), pages, bounds, len(results))
     return results
 
 
@@ -633,6 +629,11 @@ def normalize_hotel(item: Dict[str, Any], anchor: Dict[str, Any], radius_m: int)
     name = str(item.get("name") or di.get("name") or "未命名酒店")
     category = str(item.get("tag") or di.get("tag") or "")
     if not any(k in std_tag + category + name for k in ("酒店", "宾馆", "民宿", "公寓", "旅社", "客栈")):
+        return None
+    # “公寓”类目里混着大量住宅小区/写字楼（std_tag=房地产;住宅区），
+    # 只保留真正有酒店信息（价格、可订状态或档次）的条目。
+    if "房地产" in std_tag and not (di.get("pc_realtime_price") or di.get("level")
+                                   or di.get("pc_bookable") or di.get("comment_num")):
         return None
 
     lng, lat = coords.bd09mc_to_gcj02(x, y)
